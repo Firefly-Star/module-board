@@ -48,9 +48,14 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: module-board.*
-          merge-multiple: true
+          name: module-board.html
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: module-board-portable.exe
+          path: assets
+      - run: ls -la assets
       - uses: softprops/action-gh-release@v2
         with:
-          files: module-board.html, module-board-portable.exe
+          files: assets/*
           generate_release_notes: true
