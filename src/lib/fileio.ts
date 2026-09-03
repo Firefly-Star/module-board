@@ -35,8 +35,23 @@ declare global {
   interface Window {
     showOpenFilePicker?: (opts?: unknown) => Promise<FileSystemFileHandle[]>;
     showSaveFilePicker?: (opts?: unknown) => Promise<FileSystemFileHandle>;
+    moduleBoardDesktop?: DesktopBridge;
   }
 }
+
+// Electron 桌面桥（由 preload 暴露）。Electron 不支持 File System Access API，
+// 打开/保存走主进程原生对话框。
+export interface DesktopBridge {
+  open: () => Promise<{ name: string; path: string; text: string } | null>;
+  saveAs: (
+    defaultName: string,
+    text: string,
+  ) => Promise<{ name: string; path: string } | null>;
+  save: (path: string, text: string) => Promise<boolean>;
+}
+
+export const desktopBridge: DesktopBridge | null =
+  typeof window !== "undefined" ? window.moduleBoardDesktop ?? null : null;
 
 const pickerOpts = () => [
   { description: "module-board JSON", accept: { "application/json": [".json"] } },
@@ -44,6 +59,10 @@ const pickerOpts = () => [
 
 /** 打开文件，返回 {text, name}；取消或失败返回 null。 */
 export async function pickOpenFile(): Promise<{ text: string; name: string } | null> {
+  if (desktopBridge) {
+    const r = await desktopBridge.open();
+    return r ? { text: r.text, name: r.name } : null;
+  }
   if (window.showOpenFilePicker) {
     try {
       const handles = await window.showOpenFilePicker({ types: pickerOpts() });
@@ -64,6 +83,31 @@ export async function pickOpenFile(): Promise<{ text: string; name: string } | n
     input.oncancel = () => resolve(null);
     input.click();
   });
+}
+
+/** 桌面：打开文件（含绝对路径），取消返回 null。 */
+export async function desktopOpen(): Promise<{
+  name: string;
+  path: string;
+  text: string;
+} | null> {
+  if (!desktopBridge) return null;
+  return await desktopBridge.open();
+}
+
+/** 桌面：另存为并返回 {name,path}；取消返回 null。 */
+export async function desktopSaveAs(
+  suggestedName: string,
+  text: string,
+): Promise<{ name: string; path: string } | null> {
+  if (!desktopBridge) return null;
+  return await desktopBridge.saveAs(suggestedName, text);
+}
+
+/** 桌面：写回已打开/已保存过的路径。 */
+export async function desktopSave(path: string, text: string): Promise<boolean> {
+  if (!desktopBridge) return false;
+  return await desktopBridge.save(path, text);
 }
 
 /** 保存目标（File System Access）；不支持返回 null。取消返回 null。 */

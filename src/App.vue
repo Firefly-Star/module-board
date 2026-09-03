@@ -6,6 +6,10 @@ import DetailPanel from "./components/DetailPanel.vue";
 import GraphView from "./components/GraphView.vue";
 import NodeDialog from "./components/NodeDialog.vue";
 import {
+  desktopBridge,
+  desktopOpen,
+  desktopSave,
+  desktopSaveAs,
   downloadText,
   listRecent,
   pickOpenFile,
@@ -56,6 +60,7 @@ const gv = ref<InstanceType<typeof GraphView> | null>(null);
 const showDetail = ref(true);
 const showAdd = ref(false);
 const showGroups = ref(false);
+const showJson = ref(false);
 const newGroupName = ref("");
 
 const byId = computed(() => new Map(state.data.nodes.map((n) => [n.id, n])));
@@ -126,11 +131,39 @@ async function removeGroupWithConfirm(g: string) {
   }
 }
 
+// ---------- 当前 JSON 视图（跟随当前面板状态的实时序列化） ----------
+const jsonText = computed(() => JSON.stringify(state.data, null, 2));
+
+async function copyJson() {
+  const text = jsonText.value;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    ElMessage.success("已复制当前 JSON");
+  } catch {
+    ElMessage.error("复制失败");
+  }
+}
+
+function downloadCurrentJson() {
+  downloadText(`${state.data.project || "module-board"}.json`, jsonText.value);
+  ElMessage.success("已下载当前 JSON");
+}
+
 // ---------- 文件（打开/保存/另存为/新建/最近 + 未保存修改） ----------
 type AskResult = "cancel" | "save" | "saveAs" | "discard";
 
 const fileName = ref<string | null>(null);
 const fileHandle = ref<FileSystemFileHandle | null>(null);
+const desktopPath = ref<string | null>(null); // Electron 桌面模式下的当前文件绝对路径
 const dirty = ref(false);
 const ask = ref<{ res: (r: AskResult) => void } | null>(null);
 const recentList = ref<RecentEntry[]>(listRecent());
@@ -176,6 +209,24 @@ async function ensureClean(): Promise<boolean> {
 async function saveCurrent(forceAs: boolean): Promise<boolean> {
   const text = exportJson();
   const name = fileName.value || `${state.data.project || "module-board"}.json`;
+  if (desktopBridge) {
+    if (!forceAs && desktopPath.value) {
+      const ok = await desktopSave(desktopPath.value, text);
+      if (!ok) return false;
+      recordRecent(name, text);
+      markClean();
+      ElMessage.success(`已保存 ${name}`);
+      return true;
+    }
+    const r = await desktopSaveAs(name, text);
+    if (!r) return false; // 用户取消
+    desktopPath.value = r.path;
+    fileName.value = r.name;
+    recordRecent(r.name, text);
+    markClean();
+    ElMessage.success(`已保存 ${r.name}`);
+    return true;
+  }
   if (!forceAs && fileHandle.value) {
     await writeHandle(fileHandle.value, text);
     recordRecent(name, text);
@@ -209,6 +260,7 @@ function loadFromText(text: string, name: string) {
   }
   fileName.value = name;
   fileHandle.value = null;
+  desktopPath.value = null;
   markClean();
   recordRecent(name, text);
   refreshRecent();
@@ -220,12 +272,18 @@ async function onNew() {
   resetToEmpty(state.data.project);
   fileName.value = null;
   fileHandle.value = null;
+  desktopPath.value = null;
   markClean();
   selectNode(null);
 }
 
 async function onOpen() {
   if (!(await ensureClean())) return;
+  if (desktopBridge) {
+    const r = await desktopOpen();
+    if (r && loadFromText(r.text, r.name)) desktopPath.value = r.path;
+    return;
+  }
   const f = await pickOpenFile();
   if (f) loadFromText(f.text, f.name);
 }
@@ -243,6 +301,7 @@ async function onLoadExample() {
   resetToSample();
   fileName.value = null;
   fileHandle.value = null;
+  desktopPath.value = null;
   markClean();
   refreshRecent();
 }
@@ -355,6 +414,12 @@ function deleteSelectedEdge() {
   ElMessage.success("已删除连线");
 }
 
+function deleteEdgeByEvent(e: { from: string; to: string }) {
+  removeDep(e.to, e.from);
+  selectEdge(null);
+  ElMessage.success("已删除连线（撤销：Ctrl+Z）");
+}
+
 function onConnect(dependent: string, dependency: string) {
   if (dependent === dependency) {
     ElMessage.warning("不能依赖自己");
@@ -437,6 +502,7 @@ const displayName = computed(
         </el-button>
         <el-button size="small" @click="autoLayoutAll">自动布局</el-button>
         <el-button size="small" @click="showGroups = true">组别</el-button>
+        <el-button size="small" @click="showJson = true">JSON</el-button>
         <el-button size="small" :disabled="!canUndo()" @click="undo">撤销</el-button>
         <el-button size="small" :disabled="!canRedo()" @click="redo">重做</el-button>
         <el-button size="small" type="success" plain @click="showAdd = true">新增节点</el-button>
@@ -467,6 +533,7 @@ const displayName = computed(
           @toggle-collapse="toggleCollapse"
           @move-node="onMove"
           @connect="onConnect"
+          @delete-edge="deleteEdgeByEvent"
         />
 
         <div class="legend">
@@ -511,6 +578,23 @@ const displayName = computed(
         </div>
       </Transition>
     </main>
+
+    <!-- 当前 JSON 实时视图 -->
+    <el-dialog
+      :model-value="showJson"
+      title="当前 JSON（实时，跟随面板所有未保存修改）"
+      width="min(720px, 94vw)"
+      append-to-body
+      top="6vh"
+      @update:model-value="(v: boolean) => (showJson = v)"
+    >
+      <pre class="json-view">{{ jsonText }}</pre>
+      <template #footer>
+        <span class="json-hint">这是当前状态导出的 JSON——不是打开时那个未修改的旧文件内容。</span>
+        <el-button size="small" @click="copyJson">复制</el-button>
+        <el-button size="small" type="primary" plain @click="downloadCurrentJson">下载当前 JSON</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 未保存修改询问框 -->
     <el-dialog

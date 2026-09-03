@@ -48,9 +48,22 @@
 
 ```bash
 npm install
-npm run dev      # 开发
-npm run build    # 产出纯静态 dist/
+npm run dev          # 开发（http://localhost:5173/）
+npm run build        # 产出纯静态 dist/module-board.html（单文件，可离线双击）
 ```
+
+## 打包成 Windows exe
+
+```bash
+npm install
+npm run build:exe    # 在 Windows 上执行：产出 release/module-board-portable.exe
+```
+
+说明：
+- 桌面版用 Electron；打开/保存/另存为走**原生对话框**（Electron 无 File System Access，
+  由 `electron/preload.js` 暴露的桥接实现，见 `src/lib/fileio.ts` 的 desktop 分支）。
+- 网页版（Pages）与桌面版共用同一份代码与数据格式。
+- 可选：加应用图标时在 `package.json > build.win` 配 `icon`。
 
 ## 数据格式
 

@@ -21,6 +21,7 @@ const emit = defineEmits<{
   (e: "toggleCollapse", id: string): void;
   (e: "moveNode", id: string, x: number, y: number): void;
   (e: "connect", dependent: string, dependency: string): void;
+  (e: "deleteEdge", edge: { from: string; to: string }): void;
 }>();
 
 function metaOf(n: GraphNode) {
@@ -197,38 +198,49 @@ function startWire(n: GraphNode, e: PointerEvent) {
   const p = posOf(n);
   wireCursor.value = { x: p.x + p.w / 2, y: p.y };
 }
+const SNAP_PX = 26; // 距目标入口的吸附阈值（屏幕像素）
+
 function onSvgMove(e: PointerEvent) {
-  if (!wire.value) return;
-  const [wx, wy] = clientToWorld(e);
-  wireCursor.value = { x: wx, y: wy };
-  const t = hitTest(wx, wy);
-  wireTarget.value = t && t !== wire.value.source ? t : null;
+  const r = rootEl.value!.getBoundingClientRect();
+  const px = e.clientX - r.left;
+  const py = e.clientY - r.top;
+  if (wire.value) {
+    const [wx, wy] = toWorld(px, py);
+    wireCursor.value = { x: wx, y: wy };
+    wireTarget.value = nearestInlet(px, py);
+    snap.value = null;
+    return;
+  }
+  snap.value = edgeAtScreen(px, py);
 }
-function onSvgUp(e: PointerEvent) {
+
+/** 返回离光标最近的可见节点入口 id（在 SNAP_PX 内才命中），否则 null。 */
+function nearestInlet(px: number, py: number): string | null {
+  let best: string | null = null;
+  let bestD = SNAP_PX;
+  for (const n of props.nodes) {
+    if (n.id === wire.value?.source) continue;
+    const p = posMap.value.get(n.id);
+    if (!p) continue;
+    const ix = (p.x - p.w / 2) * view.k + view.tx;
+    const iy = p.y * view.k + view.ty;
+    const d = Math.hypot(px - ix, py - iy);
+    if (d < bestD) {
+      bestD = d;
+      best = n.id;
+    }
+  }
+  return best;
+}
+
+function onSvgUp() {
   if (!wire.value) return;
-  const [wx, wy] = clientToWorld(e);
-  const target = wireTarget.value ?? hitTest(wx, wy);
-  if (target && target !== wire.value.source) {
-    emit("connect", target, wire.value.source);
+  if (wireTarget.value && wireTarget.value !== wire.value.source) {
+    emit("connect", wireTarget.value, wire.value.source);
   }
   wire.value = null;
   wireTarget.value = null;
   wireCursor.value = null;
-}
-function hitTest(wx: number, wy: number): string | null {
-  for (const n of props.nodes) {
-    const p = posMap.value.get(n.id);
-    if (!p) continue;
-    if (
-      wx >= p.x - p.w / 2 &&
-      wx <= p.x + p.w / 2 &&
-      wy >= p.y - p.h / 2 &&
-      wy <= p.y + p.h / 2
-    ) {
-      return n.id;
-    }
-  }
-  return null;
 }
 /** 拖线终点：吸附到目标节点入口（左缘中点），否则跟随光标。 */
 const wireEnd = computed(() => {
@@ -279,13 +291,8 @@ function portShow(n: GraphNode): { show: boolean } {
   };
 }
 
-function isEdgeActive(e: { from: string; to: string }): boolean {
-  return (
-    hoverId.value === e.from ||
-    hoverId.value === e.to ||
-    props.selectedEdge?.from === e.from ||
-    props.selectedEdge?.to === e.to
-  );
+function isEdgeHover(e: { from: string; to: string }): boolean {
+  return hoverId.value === e.from || hoverId.value === e.to;
 }
 function isEdgeSelected(e: { from: string; to: string }): boolean {
   return props.selectedEdge?.from === e.from && props.selectedEdge?.to === e.to;
@@ -310,6 +317,97 @@ const cursor = computed(() => {
   if (panning) return "grabbing";
   return "default";
 });
+
+// ---------- 边的磁吸（光标距线最近距离在阈值内则吸附） ----------
+const SNAP_EDGE_PX = 12;
+const snap = ref<{ from: string; to: string } | null>(null);
+
+function bezSample(
+  e: { fx: number; fy: number; tx: number; ty: number },
+  n = 26,
+): Array<[number, number]> {
+  const dx = Math.max(20, (e.tx - e.fx) / 2);
+  const p0x = e.fx, p0y = e.fy;
+  const p1x = e.fx + dx, p1y = e.fy;
+  const p2x = e.tx - dx, p2y = e.ty;
+  const p3x = e.tx, p3y = e.ty;
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const mt = 1 - t;
+    const a = mt * mt * mt;
+    const b = 3 * mt * mt * t;
+    const c = 3 * mt * t * t;
+    const d = t * t * t;
+    pts.push([a * p0x + b * p1x + c * p2x + d * p3x, a * p0y + b * p1y + c * p2y + d * p3y]);
+  }
+  return pts;
+}
+
+function segDist(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const vx = bx - ax;
+  const vy = by - ay;
+  const wl2 = vx * vx + vy * vy;
+  const t = wl2 ? Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / wl2)) : 0;
+  const dx = px - (ax + t * vx);
+  const dy = py - (ay + t * vy);
+  return Math.hypot(dx, dy);
+}
+
+/** 光标（world 坐标）到边的最近距离。 */
+function distToEdge(wx: number, wy: number, e: (typeof layoutResult.value.edges)[number]): number {
+  const pts = bezSample(e);
+  let min = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    min = Math.min(min, segDist(wx, wy, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]));
+  }
+  return min;
+}
+
+function sameEdge(a: { from: string; to: string } | null, e: { from: string; to: string }) {
+  return !!a && a.from === e.from && a.to === e.to;
+}
+
+/** 选择/点击坐标用：返回落在磁吸阈值内的最近边。 */
+function edgeAtScreen(px: number, py: number): { from: string; to: string } | null {
+  const [wx, wy] = toWorld(px, py);
+  const threshold = SNAP_EDGE_PX / view.k;
+  let best: { from: string; to: string } | null = null;
+  let bestD = threshold;
+  for (const e of layoutResult.value.edges) {
+    const d = distToEdge(wx, wy, e);
+    if (d < bestD) {
+      bestD = d;
+      best = { from: e.from, to: e.to };
+    }
+  }
+  return best;
+}
+
+function onSvgLeave() {
+  snap.value = null;
+}
+
+function bgClick() {
+  if (snap.value) {
+    emit("selectEdge", snap.value);
+  } else {
+    emit("selectEdge", null);
+    emit("select", null);
+  }
+}
+
+function bgDbl() {
+  if (snap.value) return; // 双击在边上：交给选中
+  fitView();
+}
 </script>
 
 <template>
@@ -320,6 +418,7 @@ const cursor = computed(() => {
       @wheel.prevent="onWheel"
       @pointermove="onSvgMove"
       @pointerup="onSvgUp"
+      @pointerleave="onSvgLeave"
     >
       <rect
         class="gv-bg"
@@ -329,19 +428,34 @@ const cursor = computed(() => {
         @pointermove="bgMove"
         @pointerup="bgUp"
         @pointerleave="bgUp"
-        @click="emit('select', null)"
-        @dblclick.prevent="fitView"
+        @click="bgClick"
+        @dblclick.prevent="bgDbl"
       />
       <g :transform="`translate(${view.tx} ${view.ty}) scale(${view.k})`">
-        <path
+        <g
           v-for="e in layoutResult.edges"
           :key="`${e.from}->${e.to}`"
-          :d="edgePath(e)"
-          class="edge"
-          :class="{ active: isEdgeActive(e), picked: isEdgeSelected(e) }"
-          @pointerdown.stop
-          @click="emit('selectEdge', { from: e.from, to: e.to })"
-        />
+          class="edge-g"
+          :class="{ snap: sameEdge(snap, e) }"
+        >
+          <path
+            :d="edgePath(e)"
+            class="edge"
+            :class="{ hover: isEdgeHover(e), snap: sameEdge(snap, e), picked: isEdgeSelected(e) }"
+            @pointerdown.stop
+            @click="emit('selectEdge', { from: e.from, to: e.to })"
+          />
+          <g
+            class="edge-del"
+            :transform="`translate(${(e.fx + e.tx) / 2} ${(e.fy + e.ty) / 2})`"
+            @pointerdown.stop
+            @click.stop="emit('deleteEdge', { from: e.from, to: e.to })"
+          >
+            <title>删除这条依赖连线</title>
+            <circle r="7" class="edge-del-bg" />
+            <path d="M -3 -3 L 3 3 M 3 -3 L -3 3" class="edge-del-x" />
+          </g>
+        </g>
         <path v-if="wire && wireCursor" :d="wirePath()" class="wire-temp" />
 
         <g

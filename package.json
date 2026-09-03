@@ -2,12 +2,14 @@
   "name": "module-board",
   "private": true,
   "version": "0.1.0",
+  "main": "electron/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "build:exe": "npm run build && electron-builder --win portable"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",
@@ -16,9 +18,36 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",
     "vite-plugin-singlefile": "^2.3.3",
     "vue-tsc": "^2.2.0"
+  },
+  "build": {
+    "appId": "com.fireflystar.module-board",
+    "productName": "module-board",
+    "asar": true,
+    "files": [
+      "dist/**",
+      "electron/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "module-board-portable.exe"
+    }
   }
 }
